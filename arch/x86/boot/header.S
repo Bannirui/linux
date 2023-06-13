@@ -25,6 +25,45 @@
 #include "voffset.h"
 #include "zoffset.h"
 
+/**
+ * 1 内存的前1MB里面[0xFE000...0xFFFFF]这8KB是用的ROM技术 其他用的是RAM技术
+ *   BIOS程序被固化在ROM中
+ * 2 计算机通电后 强制进入16位实例模式
+ *   硬件侧强制手段保证将CPU寄存器中的CS寄存器值置为0xF0000
+ *                               IP寄存器值置为0xFFFF0
+ * 3 CS:IP地址0xFFFF0上存储的就是CPU要执行的下一条指令的地址 CPU执行到BIOS程序
+ *   地址在ROM中 也就是说不同的厂商可以定义0xFFFF0内存地址上的指令内容
+ *     - 可以写死某条真正的指令
+ *     - 可以直接是jmp指令 跳到厂商自己的BIOS入口
+ *     - ...
+ * 4 BIOS程序在实模式下对内存最前面的1MB进行规划
+ *     - [0x00000...0x003FF]1KB构建BIOS的中断向量表 存放256个中断向量 每个中断向量占4B
+ *     - [0x00400...0x004FF]256B构建BIOS数据区
+ *     - [0x0E05B...0x0FFFE]8000B存放中断服务程序
+ * 5 收到BIOS中断0x19 CPU去BIOS中断向量表中找到索引19的中断向量为0x0E6F2 这条地址上放着的是19号中断服务程序 叫做[启动加载服务程序] CPU开始执行这个程序
+ * 6 软盘第一扇区中存放的程序就是bootsect linux的引导程序
+ *     - 将软盘其后的4个扇区和随后的240个扇区内容加载到内存里面
+ * 7 0x19中断服务作用是把软盘第一扇区中的程序加载到内存中的指定位置
+ *     - 找到软盘
+ *     - 加载第一扇区->软驱0号磁头对应盘面的0磁道1扇区的512B内容
+ *     - 复制到内存指定位置->0x07C00
+ * 8 bootsect引导程序已经被载入了内存 bootsect的作用是把第二批和第三批程序加载到内存中
+ *     - 启动bootsect程序
+ *     - 将第二批程序setup加载到内存中
+ *       - bootsect对内存规划
+ *         - 设置SEPTUPLEN=4->bootsect要将软盘中4个扇区的内容加载到内存上
+ *         - 设置SETUPSEG=0x90200->第二批程序放的位置
+ *         - BOOTSEG=0x07C00->第一批程序在内存的位置 也就是bootsect程序的内存地址 将来要执行程序 CPU就从这个地址读取指令
+ *         - INITSEG=0x90000->CPU读取SETUPSEG地址后就执行了bootsect程序 他负责将[0x07C00...0x07E00)这512B的bootsect程序内容复制到[0x90000...0x90200)上
+ *         - 设置SYSSEG=0x10000和ENDSEG=SYSSEG+SYSSIZE->[SYSSEG...ENDSEG]就是内核区域
+ *         - 设置ROOT_DEV=0x30600
+ *       - 复制bootsect
+ *       - int 0x13中断将软盘0盘面0磁道的扇区[2...5]这4个扇区内容复制到0x90200上
+ *     - 将第三批程序system模块加载到内存中
+ *       - bootsect依赖BIOS的int 0x13中断将扇区[6...245]上240个扇区的内容复制到内存上[0x10000...0x2DFFF]
+ *       - 内存上这段区域为内核区
+ * 9 启动0x90200:0x0000的代码也就是第二批程序setup程序
+ */
 BOOTSEG		= 0x07C0		/* original address of boot-sector */
 SYSSEG		= 0x1000		/* historical load address >> 4 */
 
