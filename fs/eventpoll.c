@@ -127,15 +127,20 @@ struct eppoll_entry {
  * Avoid increasing the size of this struct, there can be many thousands
  * of these on a server and we do not want this to take another cache line.
  */
+/*
+ * 每个被监听的fd都会被封装成一个epitem节点
+ */
 struct epitem {
 	union {
 		/* RB tree node links this structure to the eventpoll RB tree */
+		// 用于插入到rbr红黑树
 		struct rb_node rbn;
 		/* Used to free the struct epitem */
 		struct rcu_head rcu;
 	};
 
 	/* List header used to link this structure to the eventpoll ready list */
+	// 用于插入到就绪列表rdllist
 	struct list_head rdllink;
 
 	/*
@@ -145,6 +150,7 @@ struct epitem {
 	struct epitem *next;
 
 	/* The file descriptor information this item refers to */
+	// 被监听的文件描述符
 	struct epoll_filefd ffd;
 
 	/*
@@ -158,6 +164,7 @@ struct epitem {
 	struct eppoll_entry *pwqlist;
 
 	/* The "container" of this item */
+	// 所归属的epoll实例
 	struct eventpoll *ep;
 
 	/* List header used to link this item to the "struct file" items list */
@@ -175,6 +182,7 @@ struct epitem {
  * structure and represents the main data structure for the eventpoll
  * interface.
  */
+// epoll实例
 struct eventpoll {
 	/*
 	 * This mutex is used to ensure that files are not removed
@@ -185,18 +193,21 @@ struct eventpoll {
 	struct mutex mtx;
 
 	/* Wait queue used by sys_epoll_wait() */
+	/* 等待队列 epoll_wait会睡在这 */
 	wait_queue_head_t wq;
 
 	/* Wait queue used by file->poll() */
 	wait_queue_head_t poll_wait;
 
 	/* List of ready file descriptors */
+	/* 就绪事件列表 */
 	struct list_head rdllist;
 
 	/* Lock which protects rdllist and ovflist */
 	rwlock_t lock;
 
 	/* RB tree root used to store monitored fd structs */
+	/* 红黑树存放所有监听的fd */
 	struct rb_root_cached rbr;
 
 	/*
@@ -211,7 +222,7 @@ struct eventpoll {
 
 	/* The user that created the eventpoll descriptor */
 	struct user_struct *user;
-
+	/* epoll文件对象 */
 	struct file *file;
 
 	/* used to optimize loop detection check */
@@ -357,6 +368,7 @@ static inline int ep_cmp_ffd(struct epoll_filefd *p1,
 }
 
 /* Tells us if the item is currently linked */
+// epi是不是在就绪列表中
 static inline int ep_is_linked(struct epitem *epi)
 {
 	return !list_empty(&epi->rdllink);
@@ -718,9 +730,19 @@ static void ep_free(struct eventpoll *ep)
  * while running concurrently with eventpoll_release_file().
  * Returns true if the eventpoll can be disposed.
  */
+/*
+ * 移除对某个对象的监听
+ * <ul>
+ *   <li>目标对象在epoll内部的组织形式是epitem</li>
+ *   <li>先把对象从红黑树上删除</li>
+ *   <li>要是已经被内核放到了就绪列表 也要从就绪列表中删除</li>
+ * </ul>
+ * @param ep eventpoll实例
+ * @param epi 被监听对象被封装成的epitem对象
+ */
 static bool __ep_remove(struct eventpoll *ep, struct epitem *epi, bool force)
 {
-	struct file *file = epi->ffd.file;
+	struct file *file = epi->ffd.file; // 被监听对象的file
 	struct epitems_head *to_free;
 	struct hlist_head *head;
 
@@ -753,9 +775,10 @@ static bool __ep_remove(struct eventpoll *ep, struct epitem *epi, bool force)
 	spin_unlock(&file->f_lock);
 	free_ephead(to_free);
 
-	rb_erase_cached(&epi->rbn, &ep->rbr);
+	rb_erase_cached(&epi->rbn, &ep->rbr); // 将epitem从红黑树中删除
 
 	write_lock_irq(&ep->lock);
+	// 检查epitem是不是已经在就绪列表中了 如果已经存在于就绪列表中了 得先从就绪列表中删除
 	if (ep_is_linked(epi))
 		list_del_init(&epi->rdllink);
 	write_unlock_irq(&ep->lock);
@@ -776,6 +799,10 @@ static bool __ep_remove(struct eventpoll *ep, struct epitem *epi, bool force)
 
 /*
  * ep_remove variant for callers owing an additional reference to the ep
+ */
+/*
+ * @param ep eventpoll实例
+ * @param epi 红黑树上的epitem
  */
 static void ep_remove_safe(struct eventpoll *ep, struct epitem *epi)
 {
@@ -972,7 +999,7 @@ again:
 	}
 	spin_unlock(&file->f_lock);
 }
-
+/* 创建epoll实例 */
 static int ep_alloc(struct eventpoll **pep)
 {
 	int error;
@@ -981,10 +1008,10 @@ static int ep_alloc(struct eventpoll **pep)
 
 	user = get_current_user();
 	error = -ENOMEM;
-	ep = kzalloc(sizeof(*ep), GFP_KERNEL);
+	ep = kzalloc(sizeof(*ep), GFP_KERNEL); // 分配内存并清零
 	if (unlikely(!ep))
 		goto free_uid;
-
+	/* 初始化epoll实例的成员 */
 	mutex_init(&ep->mtx);
 	rwlock_init(&ep->lock);
 	init_waitqueue_head(&ep->wq);
@@ -2045,26 +2072,26 @@ static int do_epoll_create(int flags)
 	/*
 	 * Create the internal data structure ("struct eventpoll").
 	 */
-	error = ep_alloc(&ep);
+	error = ep_alloc(&ep); // 创建epoll实例
 	if (error < 0)
 		return error;
 	/*
 	 * Creates all the items needed to setup an eventpoll file. That is,
 	 * a file structure and a free file descriptor.
 	 */
-	fd = get_unused_fd_flags(O_RDWR | (flags & O_CLOEXEC));
+	fd = get_unused_fd_flags(O_RDWR | (flags & O_CLOEXEC)); // 系统最小分配原则分配个最小的空闲fd 下面内核会拿着这个fd在files_struct中建立映射
 	if (fd < 0) {
 		error = fd;
 		goto out_free_ep;
 	}
 	file = anon_inode_getfile("[eventpoll]", &eventpoll_fops, ep,
-				 O_RDWR | (flags & O_CLOEXEC));
+				 O_RDWR | (flags & O_CLOEXEC)); // 创建一个特殊的struct file对象 这个对象没有实际磁盘文件 只存在于内核中 它的private_data指向ep 也就是epoll实例
 	if (IS_ERR(file)) {
 		error = PTR_ERR(file);
 		goto out_free_fd;
 	}
 	ep->file = file;
-	fd_install(fd, file);
+	fd_install(fd, file); // fd绑定到epoll的内部对象 以后内核就可以拿着fd索引到文件符描述表中的file 再从file的private_data找到epoll实例
 	return fd;
 
 out_free_fd:
@@ -2074,6 +2101,7 @@ out_free_ep:
 	return error;
 }
 
+/* 系统调用epoll_create 这个系统调用1个参数 */
 SYSCALL_DEFINE1(epoll_create1, int, flags)
 {
 	return do_epoll_create(flags);
@@ -2112,6 +2140,18 @@ static inline int epoll_mutex_lock(struct mutex *mutex, int depth,
 	return -EAGAIN;
 }
 
+/*
+ * @param epfd epoll_create拿到的fd
+ * @param op 对事件的操作指令<ul>
+ *   <li>添加</li>
+ *   <li>删除</li>
+ * </ul>
+ * @param fd 被监听目标的fd
+ * @param epds 事件信息 要监听目标的什么类型事件<ul>
+ *   <li>可读</li>
+ *   <li>可写</li>
+ * </ul>
+ */
 int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds,
 		 bool nonblock)
 {
@@ -2123,12 +2163,12 @@ int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds,
 	struct eventpoll *tep = NULL;
 
 	error = -EBADF;
-	f = fdget(epfd);
+	f = fdget(epfd); // epoll
 	if (!f.file)
 		goto error_return;
 
 	/* Get the "struct file *" for the target file */
-	tf = fdget(fd);
+	tf = fdget(fd); // 要监听的对象
 	if (!tf.file)
 		goto error_fput;
 
@@ -2167,7 +2207,7 @@ int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds,
 	 * At this point it is safe to assume that the "private_data" contains
 	 * our own data structure.
 	 */
-	ep = f.file->private_data;
+	ep = f.file->private_data; // 从epoll的fd拿到对应的file 再从fike的private_data拿到epoll
 
 	/*
 	 * When we insert an epoll file descriptor inside another epoll file
@@ -2187,7 +2227,7 @@ int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds,
 	error = epoll_mutex_lock(&ep->mtx, 0, nonblock);
 	if (error)
 		goto error_tgt_fput;
-	if (op == EPOLL_CTL_ADD) {
+	if (op == EPOLL_CTL_ADD) { // 添加事件
 		if (READ_ONCE(f.file->f_ep) || ep->gen == loop_check_gen ||
 		    is_file_epoll(tf.file)) {
 			mutex_unlock(&ep->mtx);
@@ -2213,18 +2253,18 @@ int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds,
 	 * above, we can be sure to be able to use the item looked up by
 	 * ep_find() till we release the mutex.
 	 */
-	epi = ep_find(ep, tf.file, fd);
+	epi = ep_find(ep, tf.file, fd); // 从红黑树找到epitem
 
 	error = -EINVAL;
-	switch (op) {
-	case EPOLL_CTL_ADD:
+	switch (op) { // 根据事件的操作指令处理被监听对象
+	case EPOLL_CTL_ADD: // 添加事件
 		if (!epi) {
 			epds->events |= EPOLLERR | EPOLLHUP;
 			error = ep_insert(ep, epds, tf.file, fd, full_check);
 		} else
 			error = -EEXIST;
 		break;
-	case EPOLL_CTL_DEL:
+	case EPOLL_CTL_DEL: // 移除事件
 		if (epi) {
 			/*
 			 * The eventpoll itself is still alive: the refcount
@@ -2268,6 +2308,19 @@ error_return:
  * the eventpoll file that enables the insertion/removal/change of
  * file descriptors inside the interest set.
  */
+/*
+ * 系统调用epoll_ctl 这个系统调用4个参数
+ * @param epfd epoll_create拿到的fd
+ * @param op 对事件的操作指令<ul>
+ *   <li>添加</li>
+ *   <li>删除</li>
+ * </ul>
+ * @param fd 被监听目标的fd
+ * @param event 事件信息 要监听目标的什么类型事件<ul>
+ *   <li>可读</li>
+ *   <li>可写</li>
+ * </ul>
+ */
 SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 		struct epoll_event __user *, event)
 {
@@ -2284,6 +2337,13 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
  * Implement the event wait interface for the eventpoll file. It is the kernel
  * part of the user space epoll_wait(2).
  */
+/*
+ * 系统调用epoll_wait
+ * @param epfd  epoll_create系统调用返回的fd
+ * @param events 用来接收内核给的就绪事件数组
+ * @param maxevents events数组长度
+ * @param to 系统调用超时设定
+ */
 static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 			 int maxevents, struct timespec64 *to)
 {
@@ -2292,6 +2352,7 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 	struct eventpoll *ep;
 
 	/* The maximum number of event must be greater than zero */
+	// 数组长度的校验
 	if (maxevents <= 0 || maxevents > EP_MAX_EVENTS)
 		return -EINVAL;
 
@@ -2300,7 +2361,7 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 		return -EFAULT;
 
 	/* Get the "struct file *" for the eventpoll file */
-	f = fdget(epfd);
+	f = fdget(epfd); // epoll实例的file
 	if (!f.file)
 		return -EBADF;
 
@@ -2316,7 +2377,7 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 	 * At this point it is safe to assume that the "private_data" contains
 	 * our own data structure.
 	 */
-	ep = f.file->private_data;
+	ep = f.file->private_data; // 拿到epoll实例
 
 	/* Time to fish for events ... */
 	error = ep_poll(ep, events, maxevents, to);
@@ -2326,6 +2387,13 @@ error_fput:
 	return error;
 }
 
+/*
+ * 系统调用epoll_wait 这个系统调用4个参数
+ * @param epfd  epoll_create系统调用返回的fd
+ * @param events 用来接收内核给的就绪事件数组
+ * @param maxevents events数组长度
+ * @param timeout 系统调用超时设定
+ */
 SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,
 		int, maxevents, int, timeout)
 {
@@ -2359,7 +2427,7 @@ static int do_epoll_pwait(int epfd, struct epoll_event __user *events,
 
 	return error;
 }
-
+/* 系统调用epoll_wait 6个参数*/
 SYSCALL_DEFINE6(epoll_pwait, int, epfd, struct epoll_event __user *, events,
 		int, maxevents, int, timeout, const sigset_t __user *, sigmask,
 		size_t, sigsetsize)
