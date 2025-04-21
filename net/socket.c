@@ -1617,6 +1617,12 @@ int sock_create_kern(struct net *net, int family, int type, int protocol, struct
 }
 EXPORT_SYMBOL(sock_create_kern);
 
+/*
+ * socket系统调用
+ * @param family IPV4 IPV6 unix域
+ * @param type udp or tcp
+ * @param protocol 一般直接指定0 表示用family和type自行推断
+ */
 static struct socket *__sys_socket_create(int family, int type, int protocol)
 {
 	struct socket *sock;
@@ -1654,7 +1660,12 @@ struct file *__sys_socket_file(int family, int type, int protocol)
 
 	return sock_alloc_file(sock, flags, NULL);
 }
-
+/*
+ * socket系统调用
+ * @param family IPV4 IPV6 unix域
+ * @param type udp or tcp
+ * @param protocol 一般直接指定0 表示用family和type自行推断
+ */
 int __sys_socket(int family, int type, int protocol)
 {
 	struct socket *sock;
@@ -1670,7 +1681,13 @@ int __sys_socket(int family, int type, int protocol)
 
 	return sock_map_fd(sock, flags & (O_CLOEXEC | O_NONBLOCK));
 }
-
+/*
+ * socket系统调用
+ * 3个参数
+ * @param family IPV4 IPV6 unix域
+ * @param type udp or tcp
+ * @param protocol 一般直接指定0 表示用family和type自行推断
+ */
 SYSCALL_DEFINE3(socket, int, family, int, type, int, protocol)
 {
 	return __sys_socket(family, type, protocol);
