@@ -39,7 +39,7 @@
  * 4 BIOS程序在实模式下对内存最前面的1MB进行规划
  *     - [0x00000...0x003FF]1KB构建BIOS的中断向量表 存放256个中断向量 每个中断向量占4B
  *     - [0x00400...0x004FF]256B构建BIOS数据区
- *     - [0x0E05B...0x0FFFE]8000B存放中断服务程序
+ *     - [0x0E05B...0x0FFFE]8100B存放中断服务程序
  * 5 收到BIOS中断0x19 CPU去BIOS中断向量表中找到索引19的中断向量为0x0E6F2 这条地址上放着的是19号中断服务程序 叫做[启动加载服务程序] CPU开始执行这个程序
  * 6 软盘第一扇区中存放的程序就是bootsect linux的引导程序
  *     - 将软盘其后的4个扇区和随后的240个扇区内容加载到内存里面
@@ -74,10 +74,10 @@ SYSSEG		= 0x1000		/* historical load address >> 4 */
 #ifndef ROOT_RDONLY
 #define ROOT_RDONLY 1
 #endif
-
+    # 告诉编译器代码跑在cpu实模式下
 	.code16
 	.section ".bstext", "ax"
-
+    # 定义全局符号 bootsec代码的入口 当BIOS把bootsec载入内存的0x7c00后CPU跳转到0x7c00 就是bootsect_start这个位置
 	.global bootsect_start
 bootsect_start:
 #ifdef CONFIG_EFI_STUB
@@ -86,23 +86,48 @@ bootsect_start:
 #endif
 
 	# Normalize the start address
+	# ljmp的经典用法 BIOS启动后CPU进入实模式 这个时候要根据CS:IP寻址找到第一个要执行的指令
+	# 虽然IP是0x0 但是此时的CS值可能不要期待的0x07C0
+	# 实模式下寻址 物理地址=CS<<4+IP
+	# 所以这个地方整个ljmp的目的在于让段寄存器CS的值为0x07CO
+    # 再配合IP=tart2 确保CPU的执行地址是0x7C00
 	ljmp	$BOOTSEG, $start2
 
 start2:
+    # 实模式下段寄存器初始化 确保系统启动的时候段寄存器的值是统一的 防止运行时地址计算错误
+    # CS的值是0x07c0 DS ES SS都统一0x07c0
+    # CS+IP->执行指令
+    # DS+BX->读写数据
+    # ES+DI->字符串处理
+    # SS+SP->操作栈
 	movw	%cs, %ax
 	movw	%ax, %ds
 	movw	%ax, %es
 	movw	%ax, %ss
 	xorw	%sp, %sp
+	# set interrupt flag启用硬件中断
 	sti
+	# clear direction flag确保后面处理字符串的时候是正向拷贝
 	cld
-
+	# 加载字符串地址 字符串是错误提示
+    # 下面要操作字符串了 先把SI指针指向字符串的起始地址 后面通过DS<<4+SI就可以定位物理地址了
+    # 从bugger_off_msg这个地址开始的字符到\0结束符 打印出来
 	movw	$bugger_off_msg, %si
 
 msg_loop:
+    # 字符串指令 从DS:SI所指的地址读一个Byte存到AL寄存器 根据方向标志DF决定SI是自增还是自减 上面sti指令已经指定了SI是自增
 	lodsb
+	# andb指令的作用是用于8位寄存器的按位与
+	# 这个地方的使用技巧是测试是否为0 不改变al的值 只设置zero flag
 	andb	%al, %al
+	# jump zero 上面andb会设置zefo flag 这个地方就判断zero flag
+	# 在处理字符串过程中遇到\0就结束 在拷贝字符串的过程中 \0会被拷贝到al寄存器中 判断是0就会进到这个跳转
 	jz	bs_die
+	# 0x10中断打印字符
+	# AH: 功能号0x0e
+	# AL: 要打印的字符
+	# BH: 页号
+	# BL: 字符属性 包括颜色 文本模式 0x07表示标准的黑底白字
 	movb	$0xe, %ah
 	movw	$7, %bx
 	int	$0x10
@@ -110,12 +135,22 @@ msg_loop:
 
 bs_die:
 	# Allow the user to press a key, then reboot
+	# AX寄存器清0
+	# AH功能号0 调用系统中断0x16 阻塞等待键盘输入
 	xorw	%ax, %ax
 	int	$0x16
+	# 能执行到这 说明已经按过键盘按键了
+	# 0x19中断的作用是把软盘第一扇区中的512B程序加载到内存中的指定位置0x07C00
+	# 并且cpu会跳到0x07C00这个位置
+	# 这个中断服务程序的功能是BIOS事先设计好的 代码是固定的 与LinuxOS无关
+	# 那么为什么是0x07C00这个地址 没有为什么 约定俗成
 	int	$0x19
 
 	# int 0x19 should never return.  In case it does anyway,
 	# invoke the BIOS reset code...
+	# 正常情况下 CPU应该就进入到了系统内核镜像了 能执行到这肯定是启动过程中构建系统内核出错了
+	# 这种情况下能做的就是重启
+	# 重置CS=0xf000 IP=0xfff0 也就是上电后CPU的执行指令位置 对应的物理地址是0xffff0 BIOS上最后的16字节
 	ljmp	$0xf000,$0xfff0
 
 #ifdef CONFIG_EFI_STUB
